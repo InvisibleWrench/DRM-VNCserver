@@ -1,6 +1,7 @@
 PROJECT(drm-vncserver)
 CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
 
+set(EXTRA_FLAGS "-I/usr/include/libdrm")
 
 FILE(GLOB SOURCES src/*.c)
 ADD_EXECUTABLE(drm-vncserver ${SOURCES})
