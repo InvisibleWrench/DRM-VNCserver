@@ -3,6 +3,9 @@ CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
 
 set(EXTRA_FLAGS "-I/usr/include/drm")
 
+FILE(GLOB SOURCES src/*.c)
+ADD_EXECUTABLE(drm-vncserver ${SOURCES})
+
 # LIBVNC
 find_library(LIBVNC NAMES libvncserver vncserver)
 
@@ -27,6 +30,5 @@ endif()
 target_include_directories(drm-vncserver PUBLIC ${DRM_INCLUDE_DIRS})
 target_link_libraries(drm-vncserver PUBLIC ${DRM_LIBRARIES} ${LIBVNC})
 
-FILE(GLOB SOURCES src/*.c)
-ADD_EXECUTABLE(drm-vncserver ${SOURCES})
+
 INSTALL(TARGETS drm-vncserver RUNTIME DESTINATION bin)
