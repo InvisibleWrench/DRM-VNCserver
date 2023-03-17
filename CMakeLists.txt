@@ -13,13 +13,13 @@ target_link_libraries(drm-vncserver ${LIBVNC})
 #DRM
 option(ENABLE_POLKIT "Use pkexec for elevated drmsend privileges" ON)
 
-find_package(PkgConfig)
-pkg_check_modules(DRM libdrm)
+#find_package(PkgConfig)
+#pkg_check_modules(DRM libdrm)
 
-if(NOT DRM_FOUND)
-	message(FATAL_ERROR "libdrm(-dev) not found")
-	return()
-endif()
+#if(NOT DRM_FOUND)
+#	message(FATAL_ERROR "libdrm(-dev) not found")
+#	return()
+#endif()
 
 if (ENABLE_POLKIT)
 	message(STATUS "Using Polkit/pkexec for elevating drmsend privileges")
