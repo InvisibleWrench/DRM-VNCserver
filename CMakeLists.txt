@@ -3,24 +3,19 @@ CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
 
 set(EXTRA_FLAGS "-I/usr/include/drm")
 
-FILE(GLOB SOURCES src/*.c)
-ADD_EXECUTABLE(drm-vncserver ${SOURCES})
-INSTALL(TARGETS drm-vncserver RUNTIME DESTINATION bin)
-
 # LIBVNC
 find_library(LIBVNC NAMES libvncserver vncserver)
-# target_link_libraries(drm-vncserver ${LIBVNC})
 
 #DRM
 option(ENABLE_POLKIT "Use pkexec for elevated drmsend privileges" ON)
 
-find_package(PkgConfig)
-pkg_check_modules(DRM libdrm)
+# find_package(PkgConfig)
+# pkg_check_modules(DRM libdrm)
 
-if(NOT DRM_FOUND)
-	message(FATAL_ERROR "libdrm(-dev) not found")
-	return()
-endif()
+# if(NOT DRM_FOUND)
+# 	message(FATAL_ERROR "libdrm(-dev) not found")
+# 	return()
+# endif()
 
 if (ENABLE_POLKIT)
 	message(STATUS "Using Polkit/pkexec for elevating drmsend privileges")
@@ -31,3 +26,7 @@ endif()
 
 target_include_directories(drm-vncserver PUBLIC ${DRM_INCLUDE_DIRS})
 target_link_libraries(drm-vncserver PUBLIC ${DRM_LIBRARIES} ${LIBVNC})
+
+FILE(GLOB SOURCES src/*.c)
+ADD_EXECUTABLE(drm-vncserver ${SOURCES})
+INSTALL(TARGETS drm-vncserver RUNTIME DESTINATION bin)
