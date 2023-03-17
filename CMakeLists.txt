@@ -12,10 +12,10 @@ find_library(LIBVNC NAMES libvncserver vncserver)
 #DRM
 option(ENABLE_POLKIT "Use pkexec for elevated drmsend privileges" ON)
 
-include(FindPkgConfig)
+# include(FindPkgConfig)
 # find_package(PkgConfig)
 # pkg_check_modules(DRM libdrm)
-pkg_check_modules(DRM REQUIRED libdrm)
+# pkg_check_modules(DRM REQUIRED libdrm)
 
 # if(NOT DRM_FOUND)
 # 	message(FATAL_ERROR "libdrm(-dev) not found")
