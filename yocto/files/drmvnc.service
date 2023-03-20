@@ -1,0 +1,9 @@
+[Unit]
+Description=DRM VNC Server
+
+[Service]
+Type=simple
+ExecStart=drm-vncserver -f /dev/dri/card0 -t /dev/input/event0 -F 30
+
+[Install]
+WantedBy=multi-user.target
