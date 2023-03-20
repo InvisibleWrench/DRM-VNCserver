@@ -5,7 +5,7 @@ FILE(GLOB SOURCES src/*.c)
 ADD_EXECUTABLE(drm-vncserver ${SOURCES})
 
 # LIBVNC
-find_library(LIBVNC NAMES libvncserver vncserver)
+find_library(LIBVNC NAMES libvncserver vncserver libdrm)
 
 #DRM
 option(ENABLE_POLKIT "Use pkexec for elevated drmsend privileges" ON)
