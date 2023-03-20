@@ -3,13 +3,15 @@ HOMEPAGE = "https://github.com/InvisibleWrench/DRM-VNCserver"
 LICENSE = "CLOSED"
 
 DEPENDS = "libvncserver libdrm drm"
-RDEPENDS_${PN} = "libvncserver libdrm"
+RDEPENDS_${PN} = "libvncserver libdrm drm"
 SRC_URI = "git://github.com/InvisibleWrench/DRM-VNCserver.git;branch=main;protocol=https \
            file://xf86drm.patch;patchdir=../recipe-sysroot/usr/include/ \
            file://xf86drmMode.patch;patchdir=../recipe-sysroot/usr/include/ \
            "
            
-SRCREV = "f706209c1d165f9b418aef284adc85bae2d49322"
+# SRCREV = "f706209c1d165f9b418aef284adc85bae2d49322"
+SRCREV = "${AUTOREV}"
+PV = "${VERSION}+git${SRCPV}"
 
 S = "${WORKDIR}/git"
 
