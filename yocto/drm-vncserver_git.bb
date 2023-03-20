@@ -9,9 +9,9 @@ SRC_URI = "git://github.com/InvisibleWrench/DRM-VNCserver.git;branch=main;protoc
            file://xf86drmMode.patch;patchdir=../recipe-sysroot/usr/include/ \
            "
            
-# SRCREV = "f706209c1d165f9b418aef284adc85bae2d49322"
-SRCREV = "${AUTOREV}"
-PV = "${VERSION}+git${SRCPV}"
+SRCREV = "b153f6a9683d767755a0c69ebd27f9366b12f909"
+# SRCREV = "${AUTOREV}"
+# PV = "${VERSION}+git${SRCPV}"
 
 S = "${WORKDIR}/git"
 
