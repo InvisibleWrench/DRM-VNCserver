@@ -31,7 +31,7 @@
 #include <linux/input.h>
 
 #include <assert.h>
-#include <errno.h>
+#include <error_printno.h>
 
 /* libvncserver */
 #include "rfb/rfb.h"
@@ -42,213 +42,332 @@
 #include "keyboard.h"
 #include "logging.h"
 
-//DRM
 #include <xf86drm.h>
-#include <libdrm/drm_fourcc.h>
 #include <xf86drmMode.h>
 
-/*****************************************************************************/
+#define SERVER_NAME "The Kikgen Labs - MPC VNC Server"
+#define TKGL_LOGO "\
+__ __| |           |  /_) |     ___|             |           |\n\
+  |   __ \\   _ \\  ' /  | |  / |      _ \\ __ \\   |      _` | __ \\   __|\n\
+  |   | | |  __/  . \\  |   <  |   |  __/ |   |  |     (   | |   |\\__ \\\n\
+ _|  _| |_|\\___| _|\\_\\_|_|\\_\\\\____|\\___|_|  _| _____|\\__,_|_.__/ ____/\n\
+"
+
+
 #define LOG_FPS
 
-#define BITS_PER_SAMPLE 5
-#define SAMPLES_PER_PIXEL 2
+#define BITS_PER_SAMPLE 8
+#define SAMPLES_PER_PIXEL 3
+//#define COLOR_MASK  0x1f001f
+#define COLOR_MASK (((1UL << BITS_PER_SAMPLE) << 1) - 1)
+#define PIXEL_FB_TO_RFB(p, r_offset, g_offset, b_offset) \
+    ((p >> r_offset) & COLOR_MASK) | (((p >> g_offset) & COLOR_MASK) << BITS_PER_SAMPLE) | (((p >> b_offset) & COLOR_MASK) << (2 * BITS_PER_SAMPLE))
+
+#ifndef ALIGN_UP
+#define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
+#endif
 
 // #define CHANNELS_PER_PIXEL 4
 
-static char fb_device[256] = "/dev/dri/card0";
+static char fb_device[256] = "/dev/fb0";
 static char touch_device[256] = "";
 static char kbd_device[256] = "";
 static char mouse_device[256] = "";
 
 static struct fb_var_screeninfo var_scrinfo;
 static struct fb_fix_screeninfo fix_scrinfo;
-static int fb_fd = -1;
-static unsigned short int *fbmmap = MAP_FAILED;
-static unsigned short int *vncbuf;
-static unsigned short int *fbbuf;
 
-static int vnc_port = 5900;
-static int vnc_rotate = 0;
-static int touch_rotate = -1;
-static int target_fps = 10;
-static rfbScreenInfoPtr server;
-static size_t bytespp;
-static unsigned int bits_per_pixel;
-static unsigned int frame_size;
-static unsigned int fb_xres;
-static unsigned int fb_yres;
+static uint32_t *RFB_FrameBuffer;
+static uint32_t *CMP_FrameBuffer;
+
+static int drmfd = -1;
+static char drmFB_device[256] = "/dev/dri/card0";
+static uint32_t *DRM_FrameBuffer = MAP_FAILED;
+
+static int VNC_port = 5900;
+static int VNC_rotate = -1;
+static int Touch_rotate = -1;
+static int Target_fps = 0;
+static rfbScreenInfoPtr RFB_Server;
+static size_t FrameBuffer_BytesPP;
+static unsigned int FrameBuffer_BitsPerPixel;
+static unsigned int FrameBuffer_Depth;
+static unsigned int FrameBufferSize;
+static unsigned int FrameBuffer_Xwidth;
+static unsigned int FrameBuffer_Yheight;
+static unsigned int FrameBufferPixelSize;
 int verbose = 0;
+
+// Rectangle to be update by vnc client
+uint16_t minX = 0 ; 
+uint16_t minY = 0 ; 
+uint16_t maxX = 0 ;
+uint16_t maxY = 0 ; 
 
 #define UNUSED(x) (void)(x)
 
-#define LOG_PREFIX "drm-vncf: "
+struct type_name {
+    unsigned int type;
+    const char *name;
+};
 
-#define ERR(fmt, ...) fprintf(stderr, LOG_PREFIX fmt "\n", ##__VA_ARGS__)
-#define MSG(fmt, ...) fprintf(stdout, LOG_PREFIX fmt "\n", ##__VA_ARGS__)
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))
 
-/* No idea, just copied from fbvncserver as part of the frame differerencing
- * algorithm.  I will probably be later rewriting all of this. */
-static struct varblock_t
+static const struct type_name connector_type_names[] = {
+    { DRM_MODE_CONNECTOR_Unknown, "unknown" },
+    { DRM_MODE_CONNECTOR_VGA, "VGA" },
+    { DRM_MODE_CONNECTOR_DVII, "DVI-I" },
+    { DRM_MODE_CONNECTOR_DVID, "DVI-D" },
+    { DRM_MODE_CONNECTOR_DVIA, "DVI-A" },
+    { DRM_MODE_CONNECTOR_Composite, "composite" },
+    { DRM_MODE_CONNECTOR_SVIDEO, "s-video" },
+    { DRM_MODE_CONNECTOR_LVDS, "LVDS" },
+    { DRM_MODE_CONNECTOR_Component, "component" },
+    { DRM_MODE_CONNECTOR_9PinDIN, "9-pin DIN" },
+    { DRM_MODE_CONNECTOR_DisplayPort, "DP" },
+    { DRM_MODE_CONNECTOR_HDMIA, "HDMI-A" },
+    { DRM_MODE_CONNECTOR_HDMIB, "HDMI-B" },
+    { DRM_MODE_CONNECTOR_TV, "TV" },
+    { DRM_MODE_CONNECTOR_eDP, "eDP" },
+    { DRM_MODE_CONNECTOR_VIRTUAL, "Virtual" },
+    { DRM_MODE_CONNECTOR_DSI, "DSI" },
+    { DRM_MODE_CONNECTOR_DPI, "DPI" },
+};
+
+// Prototypes
+static void update_screen32();
+
+const char *connector_type_name(unsigned int type)
 {
-    int min_i;
-    int min_j;
-    int max_i;
-    int max_j;
-    int r_offset;
-    int g_offset;
-    int b_offset;
-    int rfb_xres;
-    int rfb_maxy;
-} varblock;
-
-drmModeRes *__restrict drm_resources;
-drmModeConnector *__restrict valid_connector = NULL;
-drmModeModeInfo *__restrict chosen_resolution = NULL;
-drmModeEncoder *__restrict screen_encoder = NULL;
-
-/*****************************************************************************/
-
-static int init_fb(void)
-{
-    size_t pixels;
-
-    MSG("Opening card %s", fb_device);
-    const int drm_fd = open(fb_device, O_RDONLY);
-    if (drm_fd < 0)
-    {
-        perror("Cannot open card");
-        return 1;
+    if (type < ARRAY_SIZE(connector_type_names) && type >= 0) {
+        return connector_type_names[type].name;
     }
 
-    int retval = 2;
-
-    if (0 != drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1))
-    {
-        perror("Cannot tell drm to expose all planes; the rest will very likely fail");
-    }
-
-    drmModePlaneResPtr planes = drmModeGetPlaneResources(drm_fd);
-    if (!planes)
-    {
-        ERR("Cannot get drm planes: %s (%d)", strerror(errno),
-            errno);
-        goto cleanup;
-    }
-
-    // MSG("DRM planes %d:", planes->count_planes);
-
-    drmModePlanePtr plane =
-        drmModeGetPlane(drm_fd, planes->planes[0]);
-    if (!plane)
-    {
-        ERR("Cannot get drmModePlanePtr for plane %#x: %s (%d)",
-            planes->planes[0], strerror(errno), errno);
-        goto cleanup;
-    }
-
-    // MSG("fb_id=%#x", plane->fb_id);
-
-    if (!plane->fb_id)
-        goto plane_continue;
-
-    drmModeFBPtr drmfb = drmModeGetFB(drm_fd, plane->fb_id);
-    if (!drmfb)
-    {
-        ERR("Cannot get drmModeFBPtr for fb %#x: %s (%d)",
-            plane->fb_id, strerror(errno), errno);
-    }
-    else
-    {
-        if (!drmfb->handle)
-        {
-            ERR("\t\tFB handle for fb %#x is NULL",
-                plane->fb_id);
-            ERR("\t\tPossible reason: not permitted to get FB handles. Do `sudo setcap cap_sys_admin+ep %s`",
-                fb_device);
-        }
-        else
-        {
-            const int ret = drmPrimeHandleToFD(drm_fd, drmfb->handle, 0, &fb_fd);
-            if (ret != 0 || fb_fd == -1)
-            {
-                ERR("Cannot get fd for fb %#x handle %#x: %s (%d)",
-                    plane->fb_id, drmfb->handle,
-                    strerror(errno), errno);
-            }
-            else
-            {
-
-                MSG("Plane w:h pitch = %d:%d pitch %d", drmfb->width, drmfb->height, drmfb->pitch);
-
-                var_scrinfo.bits_per_pixel = drmfb->bpp;
-                var_scrinfo.xres = drmfb->width;
-                var_scrinfo.yres = drmfb->height;
-                var_scrinfo.red.offset = 16;
-                var_scrinfo.red.length = 8;
-                var_scrinfo.green.offset = 8;
-                var_scrinfo.green.length = 8;
-                var_scrinfo.blue.offset = 0;
-                var_scrinfo.blue.length = 8;
-                
-                fix_scrinfo.line_length = drmfb->pitch;
-
-                fb_xres = drmfb->width;
-                fb_yres = drmfb->height;
-
-                pixels = fb_xres * fb_yres;
-                bytespp = drmfb->bpp / 8;
-                var_scrinfo.bits_per_pixel = bits_per_pixel = drmfb->bpp;
-                frame_size = pixels * bits_per_pixel / 8;
-
-                info_print("  pixels=%d, bytespp=%d, bpp=%d, framesize=%d\n",
-                           (int)pixels, (int)bytespp,
-                           (int)var_scrinfo.bits_per_pixel, (int)frame_size);
-
-                info_print("  xres=%d, yres=%d, xresv=%d, yresv=%d, xoffs=%d, yoffs=%d, bpp=%d\n",
-                           (int)fb_xres, (int)fb_yres,
-                           (int)var_scrinfo.xres_virtual, (int)var_scrinfo.yres_virtual,
-                           (int)var_scrinfo.xoffset, (int)var_scrinfo.yoffset,
-                           (int)var_scrinfo.bits_per_pixel);
-                // info_print("  offset:length red=%d:%d green=%d:%d blue=%d:%d \n",
-                //            (int)var_scrinfo.red.offset, (int)var_scrinfo.red.length,
-                //            (int)var_scrinfo.green.offset, (int)var_scrinfo.green.length,
-                //            (int)var_scrinfo.blue.offset, (int)var_scrinfo.blue.length);
-
-                fbmmap = mmap(NULL, frame_size, PROT_READ, MAP_SHARED, fb_fd, 0);
-
-                if (fbmmap == MAP_FAILED)
-                {
-                    error_print("mmap failed\n");
-                    exit(EXIT_FAILURE);
-                }
-                retval = 0;
-            }
-        }
-        drmModeFreeFB(drmfb);
-    }
-
-plane_continue:
-    drmModeFreePlane(plane);
-
-cleanup:
-    close(drm_fd);
-    return retval;
+    return "INVALID";
 }
 
-static void cleanup_fb(void)
+///////////////////////////////////////////////////////////////////////////////
+// FrameBuffer rotation functions
+///////////////////////////////////////////////////////////////////////////////
+
+void rotateMatrix270(uint32_t * dest, uint32_t * src, uint16_t width, int16_t height)
 {
-    if (fb_fd != -1)
+    uint32_t srcOffset = 0;
+    uint32_t destOffset1 = ( width - 1 ) * height ;
+    for(uint16_t y=0; y < height; y++)
     {
-        close(fb_fd);
-        fb_fd = -1;
+        uint32_t destOffset =   y + destOffset1 ;
+        for(uint16_t x = 0; x < width; x++)
+        {
+            dest[destOffset] = src[srcOffset++];
+            destOffset -= height;
+        }
     }
+
+}
+void rotateMatrix90(uint32_t * dest, uint32_t * src, uint16_t width, int16_t height)
+{
+    uint32_t srcOffset = 0;
+    for(uint16_t y=0; y < height; y++)
+    {
+        uint32_t destOffset = height - 1 - y;
+        for(uint16_t x = 0; x < width; x++)
+        {
+            dest[destOffset] = src[srcOffset++];
+            destOffset += height;
+        }
+    }
+} 
+
+void rotateMatrix180(uint32_t  * dest, uint32_t  * src, uint16_t width, int16_t height)
+{
+    uint32_t srcOffset = 0;
+    uint32_t destOffset =  width  * height -1 ;
+    for(uint16_t y=0; y < height; y++)
+    {
+        for(uint16_t x = 0; x < width; x++)
+        {
+            dest[destOffset--] = src[srcOffset++];
+        }
+    }
+}  
+
+///////////////////////////////////////////////////////////////////////////////
+// DRM FrameBuffer initialization
+///////////////////////////////////////////////////////////////////////////////
+static void init_drmFB(void)
+{
+    drmModeFB           *drmFB;
+    drmModeRes          *drmRes;
+    drmModeCrtc         *drmCrtc;    
+    drmModeConnector    *drmConnector = NULL;
+    drmModeEncoder      *drmEncoder = NULL;
+    drmModeModeInfoPtr  drmResolution = 0;
+
+    // Open the DRM device
+    drmfd = open(drmFB_device, O_RDWR | O_CLOEXEC);
+    if (drmfd < 0)
+    {
+        error_print("Unable to open DRM device %s.\n",drmFB_device);
+        exit(EXIT_FAILURE);
+    }
+
+    info_print("DRM device %s sucessfully opened.\n",drmFB_device);
+
+    // retrieve device resources
+    drmRes = drmModeGetResources(drmfd);
+    if (!drmRes)
+    {
+        error_print("Unable to retrieve DRM resources (%d).\n", error_printno);
+        exit(EXIT_FAILURE);
+    }
+
+    if ( drmRes->count_connectors < 1 ) {
+        error_print("No connector found for that device.\n");
+        exit(EXIT_FAILURE);   
+    }
+    info_print("DRM device has %d connectors.\n", drmRes->count_connectors);
+   
+    // We use the first connector because this vncserver is for MPC devices. No more connectors...
+    drmConnector = drmModeGetConnectorCurrent(drmfd, drmRes->connectors[0]);
+    if (!drmConnector) {
+        error_print("Unable to get DRM device connector[0].\n");
+        exit(EXIT_FAILURE);
+    }
+    info_print("DRM Device Name: %s-%u\n", connector_type_name(drmConnector->connector_type), drmConnector->connector_type_id);
+    info_print("Encoder        : %d\n", drmConnector->encoder_id);
+
+    if (drmConnector->count_modes <= 0) {
+        error_print("No modes found for this connector.\n");
+        exit(EXIT_FAILURE);
+    }
+        
+    // Get resolution (we do not check preferror_printed because there is only one mode)
+    drmResolution = &drmConnector->modes[0];
+    info_print("Resolution : %ux%u@%u\n", drmResolution->hdisplay, drmResolution->vdisplay, drmResolution->vrefresh);
+    info_print("(ht: %u hs: %u he: %u hskew: %u, vt: %u  vs: %u ve: %u vscan: %u, flags: 0x%X %s)\n",
+                drmResolution->htotal, drmResolution->hsync_start, drmResolution->hsync_end, drmResolution->hskew,
+                drmResolution->vtotal, drmResolution->vsync_start, drmResolution->vsync_end, drmResolution->vscan,
+                drmResolution->flags, drmResolution->type & DRM_MODE_TYPE_PREFerror_printED ? "<P>":"");
+
+
+    drmEncoder = drmModeGetEncoder(drmfd, drmConnector->encoder_id);
+    if (!drmEncoder) {
+        error_print("Unable to drmModeGetEncoder (%d).\n", error_printno);
+        exit(EXIT_FAILURE);
+    }
+
+    drmCrtc = drmModeGetCrtc(drmfd,drmEncoder->crtc_id);
+    if (!drmCrtc) {
+        error_print("Unable to drmModeGetCrtc (%d).\n", error_printno);
+        exit(EXIT_FAILURE);           
+    }
+
+    info_print("Connector %d is connected to encoder %d CRTC %d.\n",drmConnector->connector_id,drmConnector->encoder_id, drmCrtc->crtc_id);
+    
+      /* check framebuffer id */
+    drmFB = drmModeGetFB(drmfd, drmCrtc->buffer_id);
+    if (drmFB == NULL) {
+        error_print("Unable to get framebuffer for specified CRTC.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    info_print("Got framebuffer at CRTC: %d.\n", drmCrtc->crtc_id);
+    info_print("FB depth is %u pitch in bytes %u width %u height %u bpp %u.\n", drmFB->depth, drmFB->pitch,drmFB->width,drmFB->height,drmFB->bpp);
+
+    /* Now this is how we dump the framebuffer */
+    /* structure to retrieve FB later */
+    struct drm_mode_map_dumb dumb_map;
+
+    memset(&dumb_map, 0, sizeof(dumb_map));
+    dumb_map.handle = drmFB->handle;    
+    dumb_map.offset = 0;
+
+    if ( drmIoctl(drmfd, DRM_IOCTL_MODE_MAP_DUMB, &dumb_map) != 0 ) {
+        error_print("DRM_IOCTL_MODE_MAP_DUMB failed (error_print=%d)\n", error_printno);
+        exit(EXIT_FAILURE);
+    }
+ 
+    // Recompute with drm infos..should be the same as fb0
+    FrameBufferSize          = drmFB->pitch * drmFB->height;
+    FrameBuffer_BitsPerPixel = drmFB->bpp;
+    FrameBuffer_BytesPP      = drmFB->bpp / 8;
+    FrameBuffer_Depth        = drmFB->depth;
+    FrameBufferPixelSize     = FrameBufferSize / FrameBuffer_BytesPP;
+
+    DRM_FrameBuffer = mmap(0, FrameBufferSize, PROT_READ | PROT_WRITE, MAP_SHARED, drmfd, dumb_map.offset);
+    if (DRM_FrameBuffer == MAP_FAILED) {
+        error_print("DRM frame buffer mmap failed (error_print=%d)\n", error_printno);
+        exit(EXIT_FAILURE);
+    }
+    info_print("DRM frame buffer map of %u bytes allocated at %p.\n",FrameBufferSize,DRM_FrameBuffer);
+
+    drmModeFreeEncoder(drmEncoder);
+    drmModeFreeCrtc(drmCrtc);
+    drmModeFreeConnector(drmConnector);
+    drmModeFreeResources(drmRes);
+}
+
+
+
+///////////////////////////////////////////////////////////////////////////////
+// "old" FrameBuffer initialization
+///////////////////////////////////////////////////////////////////////////////
+static void init_fb(void)
+{
+
+    int fbfd = -1;
+
+    if ((fbfd = open(fb_device, O_RDONLY)) == -1) {
+        error_print("cannot open fb device %s\n", fb_device);
+        exit(EXIT_FAILURE);
+    }
+    info_print("FB device %s successfully opened.\n");
+
+
+    if (ioctl(fbfd, FBIOGET_VSCREENINFO, &var_scrinfo) != 0) {
+        error_print("ioctl error_printor (FBIOGET_VSCREENINFO)\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (ioctl(fbfd, FBIOGET_FSCREENINFO, &fix_scrinfo) != 0) {
+        error_print("ioctl error_printor (FBIOGET_FSCREENINFO)\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /*
+     * Get actual resolution of the framebufffer, which is not always the same as the screen resolution.
+     * This prevents the screen from 'smearing' on 1366 x 768 displays
+     */
+
+    FrameBuffer_Xwidth       = fix_scrinfo.line_length / (var_scrinfo.bits_per_pixel / 8.0);
+    FrameBuffer_Yheight      = var_scrinfo.yres;
+    FrameBuffer_BytesPP      = var_scrinfo.bits_per_pixel / 8;
+    FrameBuffer_BitsPerPixel = var_scrinfo.bits_per_pixel;
+    FrameBufferSize          = FrameBuffer_Xwidth * FrameBuffer_Yheight * FrameBuffer_BytesPP;
+    
+
+    info_print(" fb xres=%d, yres=%d, xresv=%d, yresv=%d, xoffs=%d, yoffs=%d, bpp=%d\n",
+               (int)FrameBuffer_Xwidth, (int)FrameBuffer_Yheight,
+               (int)var_scrinfo.xres_virtual, (int)var_scrinfo.yres_virtual,
+               (int)var_scrinfo.xoffset, (int)var_scrinfo.yoffset,
+               (int)var_scrinfo.bits_per_pixel);
+    
+    info_print("  offset:length red=%d:%d green=%d:%d blue=%d:%d \n",
+               (int)var_scrinfo.red.offset, (int)var_scrinfo.red.length,
+               (int)var_scrinfo.green.offset, (int)var_scrinfo.green.length,
+               (int)var_scrinfo.blue.offset, (int)var_scrinfo.blue.length);
+    
+    info_print("  frame buffer size : %d bytes\n",FrameBufferSize);
+ 
+    close(fbfd); 
 }
 
 static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
     int scancode;
 
-    debug_print("Got keysym: %04x (down=%d)\n", (unsigned int)key, (int)down);
+    info_print("Got keysym: %04x (down=%d)\n", (unsigned int)key, (int)down);
 
     if ((scancode = keysym2scancode(key, cl)))
     {
@@ -268,8 +387,10 @@ by a press and release of button 4, and each step downwards is represented by
 a press and release of button 5.
   From: http://www.vislab.usyd.edu.au/blogs/index.php/2009/05/22/an-headerless-indexed-protocol-for-input-1?blog=61 */
 
-    debug_print("Got ptrevent: %04x (x=%d, y=%d)\n", buttonMask, x, y);
+    //debug_print("Got ptrevent touch: %04x (x=%d, y=%d)\n", buttonMask, x, y);
     // Simulate left mouse event as touch event
+
+    
     static int pressed = 0;
     if (buttonMask & 1)
     {
@@ -305,62 +426,81 @@ by a press and release of button 4, and each step downwards is represented by
 a press and release of button 5.
   From: http://www.vislab.usyd.edu.au/blogs/index.php/2009/05/22/an-headerless-indexed-protocol-for-input-1?blog=61 */
 
-    debug_print("Got mouse: %04x (x=%d, y=%d)\n", buttonMask, x, y);
+  //  debug_print("Got mouse: %04x (x=%d, y=%d)\n", buttonMask, x, y);
     // Simulate left mouse event as touch event
     injectMouseEvent(&var_scrinfo, buttonMask, x, y);
 }
 
-/*****************************************************************************/
-
+///////////////////////////////////////////////////////////////////////////////
+// VNC SERVER INITIALIZATION
+///////////////////////////////////////////////////////////////////////////////
 static void init_fb_server(int argc, char **argv, rfbBool enable_touch, rfbBool enable_mouse)
 {
-    info_print("Initializing server...\n");
+    info_print("Initializing VNC server...\n");
 
-    int rbytespp = bits_per_pixel == 1 ? 1 : bytespp;
-    int rframe_size = bits_per_pixel == 1 ? frame_size * 8 : frame_size;
-    /* Allocate the VNC server buffer to be managed (not manipulated) by
-     * libvncserver. */
-    vncbuf = malloc(rframe_size);
-    assert(vncbuf != NULL);
-    memset(vncbuf, bits_per_pixel == 1 ? 0xFF : 0x00, rframe_size);
+    // Allocate the VNC server buffer to be managed (not manipulated) by libvncserver.
+    RFB_FrameBuffer = malloc(FrameBufferSize);
+    assert(RFB_FrameBuffer != NULL);
+    memset(RFB_FrameBuffer, 0, FrameBufferSize);
 
-    /* Allocate the comparison buffer for detecting drawing updates from frame
-     * to frame. */
-    fbbuf = calloc(frame_size, 1);
-    assert(fbbuf != NULL);
+    // Allocate the comparison buffer for detecting drawing updates from frame to frame.
+    CMP_FrameBuffer = malloc(FrameBufferSize);
+    assert(CMP_FrameBuffer != NULL);
+    memset(CMP_FrameBuffer, 0, FrameBufferSize);
+    
+    RFB_Server = rfbGetScreen(&argc, argv, FrameBuffer_Xwidth, FrameBuffer_Yheight, BITS_PER_SAMPLE, SAMPLES_PER_PIXEL, FrameBuffer_BytesPP);
+    assert(RFB_Server != NULL);
 
-    /* TODO: This assumes var_scrinfo.bits_per_pixel is 16. */
-    server = rfbGetScreen(&argc, argv, fb_xres, fb_yres, BITS_PER_SAMPLE, SAMPLES_PER_PIXEL, rbytespp);
-    assert(server != NULL);
+    RFB_Server->desktopName  = SERVER_NAME;
+    RFB_Server->frameBuffer  = (char *)RFB_FrameBuffer;
+    RFB_Server->alwaysShared = TRUE;
+    RFB_Server->httpDir      = NULL;
+    RFB_Server->port         = VNC_port;
 
-    server->desktopName = "framebuffer";
-    server->frameBuffer = (char *)vncbuf;
-    server->alwaysShared = TRUE;
-    server->httpDir = NULL;
-    server->port = vnc_port;
+    RFB_Server->kbdAddEvent = keyevent;
+    if (enable_touch) RFB_Server->ptrAddEvent = ptrevent_touch;
+    if (enable_mouse) RFB_Server->ptrAddEvent = ptrevent_mouse; 
+    
+    // Set PixelFormat for server
+    RFB_Server->serverFormat.bitsPerPixel = FrameBuffer_BitsPerPixel ;
+    RFB_Server->serverFormat.depth        = FrameBuffer_Depth ;
+    RFB_Server->serverFormat.bigEndian    = 0 ;
+    RFB_Server->serverFormat.trueColour   = 1 ;
+    RFB_Server->serverFormat.redMax       = 0x00FF ;
+    RFB_Server->serverFormat.greenMax     = 0x00FF ;
+    RFB_Server->serverFormat.blueMax      = 0x00FF ; 
+    RFB_Server->serverFormat.blueMax      = 0x00FF ;
+ 
+    RFB_Server->serverFormat.redShift     = var_scrinfo.red.offset ;
+    RFB_Server->serverFormat.greenShift   = var_scrinfo.green.offset ;
+    RFB_Server->serverFormat.blueShift    = var_scrinfo.blue.offset ;  
+    
+    // Rotation adjustments
+    switch (VNC_rotate) {
+        case 0:
+            RFB_Server->width = FrameBuffer_Xwidth;
+            RFB_Server->height = FrameBuffer_Yheight;
+            RFB_Server->paddedWidthInBytes = FrameBuffer_Xwidth * FrameBuffer_BytesPP;
+            memcpy(RFB_FrameBuffer, DRM_FrameBuffer,FrameBufferSize);
+            break;
 
-    server->kbdAddEvent = keyevent;
-    if (enable_touch)
-    {
-        server->ptrAddEvent = ptrevent_touch;
+        case 90:
+            RFB_Server->width = FrameBuffer_Yheight;
+            RFB_Server->height = FrameBuffer_Xwidth;
+            RFB_Server->paddedWidthInBytes = RFB_Server->width * FrameBuffer_BytesPP;
+            rotateMatrix90(RFB_FrameBuffer, DRM_FrameBuffer, FrameBuffer_Xwidth, FrameBuffer_Yheight);
+            break;
+
+        default:
+            error_print("%d is an invalid rotation value. 0, 90 are correct values\n",VNC_rotate);
+            exit(EXIT_FAILURE);
     }
+    
+    rfbInitServer(RFB_Server);
 
-    if (enable_mouse)
-    {
-        server->ptrAddEvent = ptrevent_mouse;
-    }
-
-    rfbInitServer(server);
-
-    /* Mark as dirty since we haven't sent any updates at all yet. */
-    rfbMarkRectAsModified(server, 0, 0, fb_xres, fb_yres);
-
-    /* No idea. */
-    varblock.r_offset = var_scrinfo.red.offset + var_scrinfo.red.length - BITS_PER_SAMPLE;
-    varblock.g_offset = var_scrinfo.green.offset + var_scrinfo.green.length - BITS_PER_SAMPLE;
-    varblock.b_offset = var_scrinfo.blue.offset + var_scrinfo.blue.length - BITS_PER_SAMPLE;
-    varblock.rfb_xres = fb_yres;
-    varblock.rfb_maxy = fb_xres - 1;
+    // Mark as dirty since we haven't sent any updates at all yet.
+    rfbMarkRectAsModified(RFB_Server, 0, 0, RFB_Server->width - 1 , RFB_Server->height - 1);
+  
 }
 
 // sec
@@ -379,326 +519,94 @@ int timeToLogFPS()
     return elapsed > LOG_TIME;
 }
 
-/*****************************************************************************/
-// #define COLOR_MASK  0x1f001f
-#define COLOR_MASK (((1 << BITS_PER_SAMPLE) << 1) - 1)
-#define PIXEL_FB_TO_RFB(p, r_offset, g_offset, b_offset) \
-    ((p >> r_offset) & COLOR_MASK) | (((p >> g_offset) & COLOR_MASK) << BITS_PER_SAMPLE) | (((p >> b_offset) & COLOR_MASK) << (2 * BITS_PER_SAMPLE))
+static void update_rec(uint16_t x,uint16_t y) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y; 
+}
 
-static void update_screen(void)
+///////////////////////////////////////////////////////////////////////////////
+// VNC UPDATE SCREEN - 32 bits per pixel
+///////////////////////////////////////////////////////////////////////////////
+
+static void update_screen32()
 {
-#ifdef LOG_FPS
-    if (verbose)
-    {
-        static int frames = 0;
-        frames++;
-        if (timeToLogFPS())
-        {
-            double fps = frames / LOG_TIME;
-            info_print("  fps: %f\n", fps);
-            frames = 0;
-        }
-    }
-#endif
 
-    varblock.min_i = varblock.min_j = 9999;
-    varblock.max_i = varblock.max_j = -1;
+    uint32_t *f = DRM_FrameBuffer;  // -> framebuffer
+    uint32_t *c = CMP_FrameBuffer;  // -> compare framebuffer
+    uint32_t *r = RFB_FrameBuffer;  // -> remote framebuffer
 
-    if (vnc_rotate == 0 && bits_per_pixel == 24)
-    {
-        uint8_t *f = (uint8_t *)fbmmap; /* -> framebuffer         */
-        uint8_t *c = (uint8_t *)fbbuf;  /* -> compare framebuffer */
-        uint8_t *r = (uint8_t *)vncbuf; /* -> remote framebuffer  */
+    minX = RFB_Server->width - 1; 
+    minY = RFB_Server->height -1 ; 
+    maxX = maxY = 0 ; 
+ 
+    uint16_t x2, y2;
+    uint32_t destOffset ;    
+    uint8_t Changed = 0;
 
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
-        {
-            int y;
-            for (y = 0; y < (int)fb_yres; y++)
-            {
-                int x;
-                for (x = 0; x < (int)fb_xres; x++)
-                {
-                    uint32_t pixel = *(uint32_t *)f & 0x00FFFFFF;
-                    uint32_t comp = *(uint32_t *)c & 0x00FFFFFF;
-
-                    if (pixel != comp)
-                    {
-                        *(c + 0) = *(f + 0);
-                        *(c + 1) = *(f + 1);
-                        *(c + 2) = *(f + 2);
-                        uint32_t rem = PIXEL_FB_TO_RFB(pixel,
-                                                       varblock.r_offset, varblock.g_offset, varblock.b_offset);
-                        *(r + 0) = (uint8_t)((rem >> 0) & 0xFF);
-                        *(r + 1) = (uint8_t)((rem >> 8) & 0xFF);
-                        *(r + 2) = (uint8_t)((rem >> 16) & 0xFF);
-
-                        if (x < varblock.min_i)
-                            varblock.min_i = x;
-                        else if (x > varblock.max_i)
-                            varblock.max_i = x;
-
-                        if (y > varblock.max_j)
-                            varblock.max_j = y;
-                        else if (y < varblock.min_j)
-                            varblock.min_j = y;
-                    }
-
-                    f += bytespp;
-                    c += bytespp;
-                    r += bytespp;
+    if ( VNC_rotate == 90 ) {
+        for ( uint16_t y = 0 ; y < FrameBuffer_Yheight; y++) {
+            destOffset = 0;    
+            for ( uint16_t x = 0 ; x < FrameBuffer_Xwidth; x++) {
+                if ( *f != *c) {      
+                    *c = *f; 
+                    x2 = FrameBuffer_Yheight - 1 - y;
+                    y2 = x;
+                    r[destOffset + x2] = *f ;
+                    update_rec(x2,y2);
+                    Changed = 1;
                 }
-            }
+                destOffset += RFB_Server->width ;
+                f++;  c++;
+            }   
         }
     }
-    else if (vnc_rotate == 0 && bits_per_pixel == 1)
-    {
-        uint8_t *f = (uint8_t *)fbmmap; /* -> framebuffer         */
-        uint8_t *c = (uint8_t *)fbbuf;  /* -> compare framebuffer */
-        uint8_t *r = (uint8_t *)vncbuf; /* -> remote framebuffer  */
-
-        int xstep = 8;
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
-        {
-            int y;
-            for (y = 0; y < (int)fb_yres; y++)
-            {
-                int x;
-                for (x = 0; x < (int)fb_xres; x += xstep)
-                {
-                    uint8_t pixels = *f;
-
-                    if (pixels != *c)
-                    {
-                        *c = pixels;
-
-                        for (int bit = 0; bit < 8; bit++)
-                        {
-                            // *(r+bit) = ((pixels >> (7-bit)) & 0x1) ? 0xFF : 0x00;
-                            *(r + bit) = ((pixels >> (7 - bit)) & 0x1) ? 0x00 : 0xFF;
-                        }
-
-                        int x2 = x + xstep - 1;
-                        if (x < varblock.min_i)
-                            varblock.min_i = x;
-                        else if (x2 > varblock.max_i)
-                            varblock.max_i = x2;
-
-                        if (y > varblock.max_j)
-                            varblock.max_j = y;
-                        else if (y < varblock.min_j)
-                            varblock.min_j = y;
-                    }
-
-                    f += 1;
-                    c += 1;
-                    r += 8;
+ 
+    else {
+        for ( uint16_t y = 0 ; y < FrameBuffer_Yheight; y++) {
+            for ( uint16_t x = 0 ; x < FrameBuffer_Xwidth; x++) {
+                if ( *f != *c) {      
+                    *r = *c = *f; 
+                    update_rec(x,y);
+                    Changed = 1;
                 }
-            }
+                f++;  c++; r++;
+            }   
         }
     }
-    else if (vnc_rotate == 0)
-    {
-        uint32_t *f = (uint32_t *)fbmmap; /* -> framebuffer         */
-        uint32_t *c = (uint32_t *)fbbuf;  /* -> compare framebuffer */
-        uint32_t *r = (uint32_t *)vncbuf; /* -> remote framebuffer  */
-
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
-        {
-            //        memcpy(fbbuf, fbmmap, size);
-
-            int xstep = 4 / bytespp;
-
-            int y;
-            for (y = 0; y < (int)fb_yres; y++)
-            {
-                /* Compare every 1/2/4 pixels at a time */
-                int x;
-                for (x = 0; x < (int)fb_xres; x += xstep)
-                {
-                    uint32_t pixel = *f;
-
-                    if (pixel != *c)
-                    {
-                        *c = pixel;
-
-#if 0
-                /* XXX: Undo the checkered pattern to test the efficiency
-                 * gain using hextile encoding. */
-                if (pixel == 0x18e320e4 || pixel == 0x20e418e3)
-                    pixel = 0x18e318e3;
-#endif
-                        if (bytespp == 4)
-                        {
-                            *r = PIXEL_FB_TO_RFB(pixel,
-                                                 varblock.r_offset, varblock.g_offset, varblock.b_offset);
-                        }
-                        else if (bytespp == 2)
-                        {
-                            *r = PIXEL_FB_TO_RFB(pixel,
-                                                 varblock.r_offset, varblock.g_offset, varblock.b_offset);
-
-                            uint32_t high_pixel = (0xffff0000 & pixel) >> 16;
-                            uint32_t high_r = PIXEL_FB_TO_RFB(high_pixel, varblock.r_offset, varblock.g_offset, varblock.b_offset);
-                            *r |= (0xffff & high_r) << 16;
-                        }
-                        else if (bytespp == 1)
-                        {
-                            *r = pixel;
-                        }
-                        else
-                        {
-                            // TODO
-                        }
-
-                        int x2 = x + xstep - 1;
-                        if (x < varblock.min_i)
-                            varblock.min_i = x;
-                        else if (x2 > varblock.max_i)
-                            varblock.max_i = x2;
-
-                        if (y > varblock.max_j)
-                            varblock.max_j = y;
-                        else if (y < varblock.min_j)
-                            varblock.min_j = y;
-                    }
-
-                    f++;
-                    c++;
-                    r++;
-                }
-            }
-        }
-    }
-    else if (bits_per_pixel == 16)
-    {
-        uint16_t *f = (uint16_t *)fbmmap; /* -> framebuffer         */
-        uint16_t *c = (uint16_t *)fbbuf;  /* -> compare framebuffer */
-        uint16_t *r = (uint16_t *)vncbuf; /* -> remote framebuffer  */
-
-        switch (vnc_rotate)
-        {
-        case 0:
-        case 180:
-            server->width = fb_xres;
-            server->height = fb_yres;
-            server->paddedWidthInBytes = fb_xres * bytespp;
-            break;
-
-        case 90:
-        case 270:
-            server->width = fb_yres;
-            server->height = fb_xres;
-            server->paddedWidthInBytes = fb_yres * bytespp;
-            break;
-        }
-
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
-        {
-            int y;
-            for (y = 0; y < (int)fb_yres; y++)
-            {
-                /* Compare every pixels at a time */
-                int x;
-                for (x = 0; x < (int)fb_xres; x++)
-                {
-                    uint16_t pixel = *f;
-
-                    if (pixel != *c)
-                    {
-                        int x2, y2;
-
-                        *c = pixel;
-                        switch (vnc_rotate)
-                        {
-                        case 0:
-                            x2 = x;
-                            y2 = y;
-                            break;
-
-                        case 90:
-                            x2 = fb_yres - 1 - y;
-                            y2 = x;
-                            break;
-
-                        case 180:
-                            x2 = fb_xres - 1 - x;
-                            y2 = fb_yres - 1 - y;
-                            break;
-
-                        case 270:
-                            x2 = y;
-                            y2 = fb_xres - 1 - x;
-                            break;
-                        default:
-                            error_print("rotation is invalid\n");
-                            exit(EXIT_FAILURE);
-                        }
-
-                        r[y2 * server->width + x2] = PIXEL_FB_TO_RFB(pixel, varblock.r_offset, varblock.g_offset, varblock.b_offset);
-
-                        if (x2 < varblock.min_i)
-                            varblock.min_i = x2;
-                        else
-                        {
-                            if (x2 > varblock.max_i)
-                                varblock.max_i = x2;
-
-                            if (y2 > varblock.max_j)
-                                varblock.max_j = y2;
-                            else if (y2 < varblock.min_j)
-                                varblock.min_j = y2;
-                        }
-                    }
-
-                    f++;
-                    c++;
-                }
-            }
-        }
-    }
-    else
-    {
-        error_print("not supported color depth or rotation\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (varblock.min_i < 9999)
-    {
-        if (varblock.max_i < 0)
-            varblock.max_i = varblock.min_i;
-
-        if (varblock.max_j < 0)
-            varblock.max_j = varblock.min_j;
-
-        debug_print("Dirty page: %dx%d+%d+%d...\n",
-                    (varblock.max_i + 2) - varblock.min_i, (varblock.max_j + 1) - varblock.min_j,
-                    varblock.min_i, varblock.min_j);
-
-        rfbMarkRectAsModified(server, varblock.min_i, varblock.min_j,
-                              varblock.max_i + 2, varblock.max_j + 1);
-    }
+    
+    if ( ! Changed) return;
+    
+    rfbMarkRectAsModified(RFB_Server, minX, minY, maxX,maxY );
 }
 
 /*****************************************************************************/
 
 void print_usage(char **argv)
 {
-    info_print("%s [-f device] [-p port] [-t touchscreen] [-m touchscreen] [-k keyboard] [-r rotation] [-R touchscreen rotation] [-F FPS] [-v] [-h]\n"
+    fprintf(stdout,"%s [-f device] [-p port] [-t touchscreen] [-m touchscreen] [-k keyboard] [-r rotation] [-R touchscreen rotation] [-F FPS] [-v] [-h]\n"
                "-p port: VNC port, default is 5900\n"
-               "-f device: framebuffer device node, default is /dev/fb0\n"
+               "-f device: drm device node, default is %s\n"
                "-k device: keyboard device node (example: /dev/input/event0)\n"
                "-t device: touchscreen device node (example:/dev/input/event2)\n"
                "-m device: mouse device node (example:/dev/input/event2)\n"
-               "-r degrees: framebuffer rotation, default is 0\n"
+               "-r degrees: framebuffer rotation, default is 0.\n"
                "-R degrees: touchscreen rotation, default is same as framebuffer rotation\n"
-               "-F FPS: Maximum target FPS, default is 10\n"
+               "-F FPS: Maximum target FPS. Default is 0, meaning unlimited FPS.\n"
                "-v: verbose\n"
-               "-h: print this help\n",
-               *argv);
+               "-h: print this help\n\n",
+               *argv,drmFB_device);
 }
 
 int main(int argc, char **argv)
 {
+
+    fprintf(stdout,"\n%s",TKGL_LOGO);
+    fprintf(stdout,"----------------------------------------------------------------------\n");
+    fprintf(stdout,"TKGL VNC SERVER FOR DRM DEVICES - V1.0\n");
+    fprintf(stdout,"(c) The KikGen Labs.\n\n");
+
     if (argc > 1)
     {
         int i = 1;
@@ -715,7 +623,7 @@ int main(int argc, char **argv)
                 case 'f':
                     i++;
                     if (argv[i])
-                        strcpy(fb_device, argv[i]);
+                        strcpy(drmFB_device, argv[i]);
                     break;
                 case 't':
                     i++;
@@ -726,7 +634,7 @@ int main(int argc, char **argv)
                     i++;
                     if (argv[i])
                         strcpy(mouse_device, argv[i]);
-                    break;
+                    break;                    
                 case 'k':
                     i++;
                     strcpy(kbd_device, argv[i]);
@@ -734,22 +642,22 @@ int main(int argc, char **argv)
                 case 'p':
                     i++;
                     if (argv[i])
-                        vnc_port = atoi(argv[i]);
+                        VNC_port = atoi(argv[i]);
                     break;
                 case 'r':
                     i++;
                     if (argv[i])
-                        vnc_rotate = atoi(argv[i]);
+                        VNC_rotate = atoi(argv[i]);
                     break;
                 case 'R':
                     i++;
                     if (argv[i])
-                        touch_rotate = atoi(argv[i]);
+                        Touch_rotate = atoi(argv[i]);
                     break;
-                case 'F':
+               case 'F':
                     i++;
                     if (argv[i])
-                        target_fps = atoi(argv[i]);
+                        Target_fps = atoi(argv[i]);
                     break;
                 case 'v':
                     verbose = 1;
@@ -760,80 +668,75 @@ int main(int argc, char **argv)
         }
     }
 
-    if (touch_rotate < 0)
-        touch_rotate = vnc_rotate;
+  	info_print("VNCSERVER STARTING...\n");
 
-    info_print("Initializing framebuffer device %s...\n", fb_device);
-    
-    int res = init_fb();
-    if (res != 0) {
-        info_print("Initializing framebuffer failed %d. exit", res);
-        exit(res);
+    init_fb();
+    init_drmFB();
+
+    if (FrameBuffer_BitsPerPixel != 32) {
+        error_print("Only 32 bits framebuffer is supported. Current Bits Per Pixel is %d.\n",FrameBuffer_BitsPerPixel);
+        exit(EXIT_FAILURE);
     }
+
+   
+    if ( FrameBuffer_Xwidth < FrameBuffer_Yheight  && VNC_rotate < 0 ) {
+        info_print("Display auto rotation activated (90°)\n");
+        VNC_rotate = 90;
+    } 
+
+    if (VNC_rotate < 0 )  VNC_rotate = 0 ;
+    if (Touch_rotate < 0) Touch_rotate = VNC_rotate;   
     
-    if (strlen(kbd_device) > 0)
-    {
+    if (strlen(kbd_device) > 0) {
         int ret = init_kbd(kbd_device);
-        if (!ret)
-            info_print("Keyboard device %s not available.\n", kbd_device);
+        if (!ret) error_print("Keyboard device %s not available.\n", kbd_device);
     }
-    else
-    {
-        info_print("No keyboard device\n");
-    }
+    else info_print("No keyboard device. You may use -k command line option\n");
 
     rfbBool enable_touch = FALSE;
     rfbBool enable_mouse = FALSE;
-    if (strlen(touch_device) > 0 && strlen(mouse_device) > 0)
-    {
-        error_print("It can't using both mouse and touch device.\n");
+    if(strlen(touch_device) > 0 && strlen(mouse_device) > 0) {
+        error_print("It is not possible to use both mouse and touch device.\n");
         exit(EXIT_FAILURE);
     }
-    else if (strlen(touch_device) > 0)
-    {
+    else if (strlen(touch_device) > 0) {
         // init touch only if there is a touch device defined
-        int ret = init_touch(touch_device, touch_rotate);
+        int ret = init_touch(touch_device, Touch_rotate);
         enable_touch = (ret > 0);
     }
-    else if (strlen(mouse_device) > 0)
-    {
-        // init touch only if there is a mouse device defined
-        int ret = init_mouse(mouse_device, touch_rotate);
-        enable_mouse = (ret > 0);
+    else if(strlen(mouse_device) > 0) {
+        // init mouse only if there is a mouse device defined
+        int ret = init_mouse(mouse_device, Touch_rotate);
+        enable_mouse = (ret > 0);        
     }
-    else
-    {
-        info_print("No touch or mouse device\n");
+    else {
+        info_print("No touch or mouse device. You may use -t command line option.\n");
     }
 
-    info_print("Initializing VNC server:\n");
-    info_print("	width:  %d\n", (int)fb_xres);
-    info_print("	height: %d\n", (int)fb_yres);
-    info_print("	bpp:    %d\n", (int)var_scrinfo.bits_per_pixel);
-    info_print("	port:   %d\n", (int)vnc_port);
-    info_print("	rotate: %d\n", (int)vnc_rotate);
-    info_print("  mouse/touch rotate: %d\n", (int)touch_rotate);
-    info_print("    target FPS: %d\n", (int)target_fps);
+    info_print("VNC (TKGL) server initialized with the following parameters :\n");
+    info_print("  width,height       : %d,%d\n", (int)FrameBuffer_Xwidth,(int)FrameBuffer_Yheight);
+    info_print("  bpp                : %d\n", (int)var_scrinfo.bits_per_pixel);
+    info_print("  port               : %d\n", (int)VNC_port);
+    info_print("  rotate             : %d\n", (int)VNC_rotate);
+    info_print("  mouse/touch rotate : %d\n", (int)Touch_rotate);
+    info_print("  target FPS         : %d\n", (int)Target_fps);
+
     init_fb_server(argc, argv, enable_touch, enable_mouse);
-
+    
     /* Implement our own event loop to detect changes in the framebuffer. */
     while (1)
     {
-        rfbRunEventLoop(server, 100 * 1000, TRUE);
-        while (rfbIsActive(server))
+        rfbRunEventLoop(RFB_Server, -1, TRUE);
+        while (rfbIsActive(RFB_Server) )
         {
-            if (server->clientHead != NULL)
-                update_screen();
-
-            if (target_fps > 0)
-                usleep(1000 * 1000 / target_fps);
-            else if (server->clientHead == NULL)
-                usleep(100 * 1000);
+            if ( RFB_Server->clientHead != NULL ) update_screen32();
+            else if (Target_fps > 0) usleep(1000 * 1000 / Target_fps);
+            usleep(10 * 1000);   
         }
     }
-
-    info_print("Cleaning up...\n");
-    cleanup_fb();
+ 
+    info_print("Cleaning up things...\n");
+    close(drmfd);
     cleanup_kbd();
     cleanup_touch();
 }
