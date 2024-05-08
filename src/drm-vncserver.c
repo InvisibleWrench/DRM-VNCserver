@@ -677,10 +677,10 @@ int main(int argc, char **argv)
     init_fb();
     init_drmFB();
 
-    if (FrameBuffer_BitsPerPixel != 32) {
-        ERR("Only 32 bits framebuffer is supported. Current Bits Per Pixel is %d.\n",FrameBuffer_BitsPerPixel);
-        exit(EXIT_FAILURE);
-    }
+    // if (FrameBuffer_BitsPerPixel != 32) {
+    //     ERR("Only 32 bits framebuffer is supported. Current Bits Per Pixel is %d.\n",FrameBuffer_BitsPerPixel);
+    //     exit(EXIT_FAILURE);
+    // }
 
    
     if ( FrameBuffer_Xwidth < FrameBuffer_Yheight  && VNC_rotate < 0 ) {
