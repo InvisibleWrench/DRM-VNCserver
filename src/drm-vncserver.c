@@ -40,7 +40,6 @@
 #include "touch.h"
 #include "mouse.h"
 #include "keyboard.h"
-#include "logging.h"
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -66,6 +65,9 @@ __ __| |           |  /_) |     ___|             |           |\n\
 #ifndef ALIGN_UP
 #define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
 #endif
+
+#define ERR(fmt, ...) fprintf(stderr, LOG_PREFIX fmt "\n", ##__VA_ARGS__)
+#define MSG(fmt, ...) fprintf(stdout, LOG_PREFIX fmt "\n", ##__VA_ARGS__)
 
 // #define CHANNELS_PER_PIXEL 4
 
@@ -208,72 +210,72 @@ static void init_drmFB(void)
     drmfd = open(drmFB_device, O_RDWR | O_CLOEXEC);
     if (drmfd < 0)
     {
-        error_print("Unable to open DRM device %s.\n",drmFB_device);
+        ERR("Unable to open DRM device %s.\n",drmFB_device);
         exit(EXIT_FAILURE);
     }
 
-    info_print("DRM device %s sucessfully opened.\n",drmFB_device);
+    MSG("DRM device %s sucessfully opened.\n",drmFB_device);
 
     // retrieve device resources
     drmRes = drmModeGetResources(drmfd);
     if (!drmRes)
     {
-        error_print("Unable to retrieve DRM resources (%d).\n", error_printno);
+        ERR("Unable to retrieve DRM resources (%d).\n", ERRno);
         exit(EXIT_FAILURE);
     }
 
     if ( drmRes->count_connectors < 1 ) {
-        error_print("No connector found for that device.\n");
+        ERR("No connector found for that device.\n");
         exit(EXIT_FAILURE);   
     }
-    info_print("DRM device has %d connectors.\n", drmRes->count_connectors);
+    MSG("DRM device has %d connectors.\n", drmRes->count_connectors);
    
     // We use the first connector because this vncserver is for MPC devices. No more connectors...
     drmConnector = drmModeGetConnectorCurrent(drmfd, drmRes->connectors[0]);
     if (!drmConnector) {
-        error_print("Unable to get DRM device connector[0].\n");
+        ERR("Unable to get DRM device connector[0].\n");
         exit(EXIT_FAILURE);
     }
-    info_print("DRM Device Name: %s-%u\n", connector_type_name(drmConnector->connector_type), drmConnector->connector_type_id);
-    info_print("Encoder        : %d\n", drmConnector->encoder_id);
+    MSG("DRM Device Name: %s-%u\n", connector_type_name(drmConnector->connector_type), drmConnector->connector_type_id);
+    MSG("Encoder        : %d\n", drmConnector->encoder_id);
 
     if (drmConnector->count_modes <= 0) {
-        error_print("No modes found for this connector.\n");
+        ERR("No modes found for this connector.\n");
         exit(EXIT_FAILURE);
     }
         
-    // Get resolution (we do not check preferror_printed because there is only one mode)
+    // Get resolution (we do not check prefERRed because there is only one mode)
     drmResolution = &drmConnector->modes[0];
-    info_print("Resolution : %ux%u@%u\n", drmResolution->hdisplay, drmResolution->vdisplay, drmResolution->vrefresh);
-    info_print("(ht: %u hs: %u he: %u hskew: %u, vt: %u  vs: %u ve: %u vscan: %u, flags: 0x%X %s)\n",
+    MSG("Resolution : %ux%u@%u\n", drmResolution->hdisplay, drmResolution->vdisplay, drmResolution->vrefresh);
+    MSG("(ht: %u hs: %u he: %u hskew: %u, vt: %u  vs: %u ve: %u vscan: %u, flags: 0x%X %s)\n",
                 drmResolution->htotal, drmResolution->hsync_start, drmResolution->hsync_end, drmResolution->hskew,
                 drmResolution->vtotal, drmResolution->vsync_start, drmResolution->vsync_end, drmResolution->vscan,
-                drmResolution->flags, drmResolution->type & DRM_MODE_TYPE_PREFerror_printED ? "<P>":"");
+                drmResolution->flags, drmResolution->type & DRM_MODE_TYPE_PREFERRED ? "<P>":"");
 
 
     drmEncoder = drmModeGetEncoder(drmfd, drmConnector->encoder_id);
     if (!drmEncoder) {
-        error_print("Unable to drmModeGetEncoder (%d).\n", error_printno);
+        ERR("Unable to drmModeGetEncoder (%d).\n", ERRno);
         exit(EXIT_FAILURE);
     }
 
     drmCrtc = drmModeGetCrtc(drmfd,drmEncoder->crtc_id);
     if (!drmCrtc) {
-        error_print("Unable to drmModeGetCrtc (%d).\n", error_printno);
+        ERR("Unable to drmModeGetCrtc (%d).\n", ERRno);
         exit(EXIT_FAILURE);           
     }
 
-    info_print("Connector %d is connected to encoder %d CRTC %d.\n",drmConnector->connector_id,drmConnector->encoder_id, drmCrtc->crtc_id);
+    MSG("Connector %d is connected to encoder %d CRTC %d.\n",drmConnector->connector_id,drmConnector->encoder_id, drmCrtc->crtc_id);
     
       /* check framebuffer id */
     drmFB = drmModeGetFB(drmfd, drmCrtc->buffer_id);
     if (drmFB == NULL) {
-        error_print("Unable to get framebuffer for specified CRTC.\n");
+        ERR("Unable to get framebuffer for specified CRTC.\n");
         exit(EXIT_FAILURE);
     }
 
-    info_print("Got framebuffer at CRTC: %d.\n", drmCrtc->crtc_id);
-    info_print("FB depth is %u pitch in bytes %u width %u height %u bpp %u.\n", drmFB->depth, drmFB->pitch,drmFB->width,drmFB->height,drmFB->bpp);
+    MSG("Got framebuffer at CRTC: %d.\n", drmCrtc->crtc_id);
+    MSG("FB depth is %u pitch in bytes %u width %u height %u bpp %u.\n", drmFB->depth, drmFB->pitch,drmFB->width,drmFB->height,drmFB->bpp);
 
     /* Now this is how we dump the framebuffer */
     /* structure to retrieve FB later */
@@ -284,7 +286,7 @@ static void init_drmFB(void)
     dumb_map.offset = 0;
 
     if ( drmIoctl(drmfd, DRM_IOCTL_MODE_MAP_DUMB, &dumb_map) != 0 ) {
-        error_print("DRM_IOCTL_MODE_MAP_DUMB failed (error_print=%d)\n", error_printno);
+        ERR("DRM_IOCTL_MODE_MAP_DUMB failed (ERR=%d)\n", ERRno);
         exit(EXIT_FAILURE);
     }
  
@@ -297,10 +299,10 @@ static void init_drmFB(void)
 
     DRM_FrameBuffer = mmap(0, FrameBufferSize, PROT_READ | PROT_WRITE, MAP_SHARED, drmfd, dumb_map.offset);
     if (DRM_FrameBuffer == MAP_FAILED) {
-        error_print("DRM frame buffer mmap failed (error_print=%d)\n", error_printno);
+        ERR("DRM frame buffer mmap failed (ERR=%d)\n", ERRno);
         exit(EXIT_FAILURE);
     }
-    info_print("DRM frame buffer map of %u bytes allocated at %p.\n",FrameBufferSize,DRM_FrameBuffer);
+    MSG("DRM frame buffer map of %u bytes allocated at %p.\n",FrameBufferSize,DRM_FrameBuffer);
 
     drmModeFreeEncoder(drmEncoder);
     drmModeFreeCrtc(drmCrtc);
@@ -319,19 +321,19 @@ static void init_fb(void)
     int fbfd = -1;
 
     if ((fbfd = open(fb_device, O_RDONLY)) == -1) {
-        error_print("cannot open fb device %s\n", fb_device);
+        ERR("cannot open fb device %s\n", fb_device);
         exit(EXIT_FAILURE);
     }
-    info_print("FB device %s successfully opened.\n");
+    MSG("FB device %s successfully opened.\n");
 
 
     if (ioctl(fbfd, FBIOGET_VSCREENINFO, &var_scrinfo) != 0) {
-        error_print("ioctl error_printor (FBIOGET_VSCREENINFO)\n");
+        ERR("ioctl ERRor (FBIOGET_VSCREENINFO)\n");
         exit(EXIT_FAILURE);
     }
 
     if (ioctl(fbfd, FBIOGET_FSCREENINFO, &fix_scrinfo) != 0) {
-        error_print("ioctl error_printor (FBIOGET_FSCREENINFO)\n");
+        ERR("ioctl ERRor (FBIOGET_FSCREENINFO)\n");
         exit(EXIT_FAILURE);
     }
 
@@ -347,18 +349,18 @@ static void init_fb(void)
     FrameBufferSize          = FrameBuffer_Xwidth * FrameBuffer_Yheight * FrameBuffer_BytesPP;
     
 
-    info_print(" fb xres=%d, yres=%d, xresv=%d, yresv=%d, xoffs=%d, yoffs=%d, bpp=%d\n",
+    MSG(" fb xres=%d, yres=%d, xresv=%d, yresv=%d, xoffs=%d, yoffs=%d, bpp=%d\n",
                (int)FrameBuffer_Xwidth, (int)FrameBuffer_Yheight,
                (int)var_scrinfo.xres_virtual, (int)var_scrinfo.yres_virtual,
                (int)var_scrinfo.xoffset, (int)var_scrinfo.yoffset,
                (int)var_scrinfo.bits_per_pixel);
     
-    info_print("  offset:length red=%d:%d green=%d:%d blue=%d:%d \n",
+    MSG("  offset:length red=%d:%d green=%d:%d blue=%d:%d \n",
                (int)var_scrinfo.red.offset, (int)var_scrinfo.red.length,
                (int)var_scrinfo.green.offset, (int)var_scrinfo.green.length,
                (int)var_scrinfo.blue.offset, (int)var_scrinfo.blue.length);
     
-    info_print("  frame buffer size : %d bytes\n",FrameBufferSize);
+    MSG("  frame buffer size : %d bytes\n",FrameBufferSize);
  
     close(fbfd); 
 }
@@ -367,7 +369,7 @@ static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
     int scancode;
 
-    info_print("Got keysym: %04x (down=%d)\n", (unsigned int)key, (int)down);
+    MSG("Got keysym: %04x (down=%d)\n", (unsigned int)key, (int)down);
 
     if ((scancode = keysym2scancode(key, cl)))
     {
@@ -436,7 +438,7 @@ a press and release of button 5.
 ///////////////////////////////////////////////////////////////////////////////
 static void init_fb_server(int argc, char **argv, rfbBool enable_touch, rfbBool enable_mouse)
 {
-    info_print("Initializing VNC server...\n");
+    MSG("Initializing VNC server...\n");
 
     // Allocate the VNC server buffer to be managed (not manipulated) by libvncserver.
     RFB_FrameBuffer = malloc(FrameBufferSize);
@@ -492,7 +494,7 @@ static void init_fb_server(int argc, char **argv, rfbBool enable_touch, rfbBool 
             break;
 
         default:
-            error_print("%d is an invalid rotation value. 0, 90 are correct values\n",VNC_rotate);
+            ERR("%d is an invalid rotation value. 0, 90 are correct values\n",VNC_rotate);
             exit(EXIT_FAILURE);
     }
     
@@ -668,19 +670,19 @@ int main(int argc, char **argv)
         }
     }
 
-  	info_print("VNCSERVER STARTING...\n");
+  	MSG("VNCSERVER STARTING...\n");
 
     init_fb();
     init_drmFB();
 
     if (FrameBuffer_BitsPerPixel != 32) {
-        error_print("Only 32 bits framebuffer is supported. Current Bits Per Pixel is %d.\n",FrameBuffer_BitsPerPixel);
+        ERR("Only 32 bits framebuffer is supported. Current Bits Per Pixel is %d.\n",FrameBuffer_BitsPerPixel);
         exit(EXIT_FAILURE);
     }
 
    
     if ( FrameBuffer_Xwidth < FrameBuffer_Yheight  && VNC_rotate < 0 ) {
-        info_print("Display auto rotation activated (90°)\n");
+        MSG("Display auto rotation activated (90°)\n");
         VNC_rotate = 90;
     } 
 
@@ -689,14 +691,14 @@ int main(int argc, char **argv)
     
     if (strlen(kbd_device) > 0) {
         int ret = init_kbd(kbd_device);
-        if (!ret) error_print("Keyboard device %s not available.\n", kbd_device);
+        if (!ret) ERR("Keyboard device %s not available.\n", kbd_device);
     }
-    else info_print("No keyboard device. You may use -k command line option\n");
+    else MSG("No keyboard device. You may use -k command line option\n");
 
     rfbBool enable_touch = FALSE;
     rfbBool enable_mouse = FALSE;
     if(strlen(touch_device) > 0 && strlen(mouse_device) > 0) {
-        error_print("It is not possible to use both mouse and touch device.\n");
+        ERR("It is not possible to use both mouse and touch device.\n");
         exit(EXIT_FAILURE);
     }
     else if (strlen(touch_device) > 0) {
@@ -710,16 +712,16 @@ int main(int argc, char **argv)
         enable_mouse = (ret > 0);        
     }
     else {
-        info_print("No touch or mouse device. You may use -t command line option.\n");
+        MSG("No touch or mouse device. You may use -t command line option.\n");
     }
 
-    info_print("VNC (TKGL) server initialized with the following parameters :\n");
-    info_print("  width,height       : %d,%d\n", (int)FrameBuffer_Xwidth,(int)FrameBuffer_Yheight);
-    info_print("  bpp                : %d\n", (int)var_scrinfo.bits_per_pixel);
-    info_print("  port               : %d\n", (int)VNC_port);
-    info_print("  rotate             : %d\n", (int)VNC_rotate);
-    info_print("  mouse/touch rotate : %d\n", (int)Touch_rotate);
-    info_print("  target FPS         : %d\n", (int)Target_fps);
+    MSG("VNC (TKGL) server initialized with the following parameters :\n");
+    MSG("  width,height       : %d,%d\n", (int)FrameBuffer_Xwidth,(int)FrameBuffer_Yheight);
+    MSG("  bpp                : %d\n", (int)var_scrinfo.bits_per_pixel);
+    MSG("  port               : %d\n", (int)VNC_port);
+    MSG("  rotate             : %d\n", (int)VNC_rotate);
+    MSG("  mouse/touch rotate : %d\n", (int)Touch_rotate);
+    MSG("  target FPS         : %d\n", (int)Target_fps);
 
     init_fb_server(argc, argv, enable_touch, enable_mouse);
     
@@ -735,7 +737,7 @@ int main(int argc, char **argv)
         }
     }
  
-    info_print("Cleaning up things...\n");
+    MSG("Cleaning up things...\n");
     close(drmfd);
     cleanup_kbd();
     cleanup_touch();
