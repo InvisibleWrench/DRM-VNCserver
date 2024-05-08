@@ -31,7 +31,7 @@
 #include <linux/input.h>
 
 #include <assert.h>
-#include <error_printno.h>
+#include <errno.h>
 
 /* libvncserver */
 #include "rfb/rfb.h"
