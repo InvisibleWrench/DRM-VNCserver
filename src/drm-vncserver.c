@@ -66,6 +66,8 @@ __ __| |           |  /_) |     ___|             |           |\n\
 #define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
 #endif
 
+#define LOG_PREFIX "drm-vncf: "
+
 #define ERR(fmt, ...) fprintf(stderr, LOG_PREFIX fmt "\n", ##__VA_ARGS__)
 #define MSG(fmt, ...) fprintf(stdout, LOG_PREFIX fmt "\n", ##__VA_ARGS__)
 
