@@ -135,7 +135,7 @@ static int init_fb(void)
         goto cleanup;
     }
 
-    // MSG("DRM planes %d:", planes->count_planes);
+    MSG("DRM planes %d:", planes->count_planes);
 
     drmModePlanePtr plane =
         drmModeGetPlane(drm_fd, planes->planes[0]);
@@ -146,7 +146,7 @@ static int init_fb(void)
         goto cleanup;
     }
 
-    // MSG("fb_id=%#x", plane->fb_id);
+    MSG("fb_id=%#x", plane->fb_id);
 
     if (!plane->fb_id)
         goto plane_continue;
